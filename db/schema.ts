@@ -4,6 +4,7 @@ export const savedItems = sqliteTable("saved_items", {
   id: text("id").primaryKey(),
   userId: text("user_id").notNull(),
   title: text("title").notNull(),
+  brand: text("brand").notNull().default(""),
   url: text("url").notNull().default(""),
   category: text("category").notNull(),
   price: integer("price"),
@@ -11,6 +12,15 @@ export const savedItems = sqliteTable("saved_items", {
   sourceDescription: text("source_description").notNull().default(""),
   imageKey: text("image_key"),
   createdAt: text("created_at").notNull(),
+});
+
+export const priceHistory = sqliteTable("price_history", {
+  id: text("id").primaryKey(),
+  itemId: text("item_id").notNull().references(() => savedItems.id, { onDelete: "cascade" }),
+  userId: text("user_id").notNull(),
+  price: integer("price").notNull(),
+  source: text("source").notNull(),
+  recordedAt: text("recorded_at").notNull(),
 });
 
 export const savedItemImages = sqliteTable("saved_item_images", {

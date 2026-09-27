@@ -4,6 +4,7 @@ const allowedImageTypes = new Set(["image/jpeg", "image/png", "image/webp", "ima
 const redirectStatuses = new Set([301, 302, 303, 307, 308]);
 
 export type ProductPage = {
+  brand: string;
   title: string;
   description: string;
   price: number | null;
@@ -113,7 +114,7 @@ function categoryFor(value: string): ProductPage["category"] {
   return "기타";
 }
 
-function findProducts(value: unknown, product: { name?: string; description?: string; images: string[]; price?: string; currency?: string }, depth = 0): void {
+function findProducts(value: unknown, product: { brand?: string; name?: string; description?: string; images: string[]; price?: string; currency?: string }, depth = 0): void {
   if (depth > 7 || value == null) return;
   if (Array.isArray(value)) { for (const item of value.slice(0, 40)) findProducts(item, product, depth + 1); return; }
   if (typeof value !== "object") return;
@@ -121,6 +122,10 @@ function findProducts(value: unknown, product: { name?: string; description?: st
   const types = Array.isArray(object["@type"]) ? object["@type"] : [object["@type"]];
   const isProduct = types.some((type) => typeof type === "string" && /product/i.test(type));
   if (isProduct) {
+    if (product.name) return;
+    const brand = Array.isArray(object.brand) ? object.brand[0] : object.brand;
+    if (typeof brand === "string") product.brand = brand;
+    else if (brand && typeof brand === "object" && typeof (brand as Record<string, unknown>).name === "string") product.brand = (brand as { name: string }).name;
     if (!product.name && typeof object.name === "string") product.name = object.name;
     if (!product.description && typeof object.description === "string") product.description = object.description;
     const images = object.image;
@@ -141,7 +146,7 @@ function findProducts(value: unknown, product: { name?: string; description?: st
   }
 }
 
-function getPageDetails(html: string, baseUrl: URL): ProductPage {
+export function getPageDetails(html: string, baseUrl: URL): ProductPage {
   const meta: Record<string, string[]> = {};
   for (const tag of html.match(/<meta\b[^>]*>/gi) ?? []) {
     const attrs = attributes(tag);
@@ -149,16 +154,18 @@ function getPageDetails(html: string, baseUrl: URL): ProductPage {
     if (key && attrs.content) (meta[key] ??= []).push(attrs.content);
   }
   const first = (...keys: string[]) => keys.map((key) => meta[key]?.[0]).find(Boolean) ?? "";
-  const jsonLd: { name?: string; description?: string; images: string[]; price?: string; currency?: string } = { images: [] };
+  const jsonLd: { brand?: string; name?: string; description?: string; images: string[]; price?: string; currency?: string } = { images: [] };
   for (const match of html.matchAll(/<script\b[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)) {
     try { findProducts(JSON.parse(match[1].trim()), jsonLd); } catch { /* Ignore malformed product snippets. */ }
   }
   const titleTag = html.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? "";
-  const title = (jsonLd.name || first("og:title", "twitter:title") || plainText(titleTag)).slice(0, 160);
+  const title = decode(jsonLd.name || first("og:title", "twitter:title") || plainText(titleTag)).slice(0, 300);
+  const brand = decode(jsonLd.brand || first("product:brand", "og:brand", "brand")).slice(0, 160);
   const description = (jsonLd.description || first("og:description", "twitter:description", "description")).slice(0, 1200);
-  const currency = first("product:price:currency", "og:price:currency") || jsonLd.currency || "KRW";
-  const priceText = first("product:price:amount", "og:price:amount") || jsonLd.price || "";
-  const parsedPrice = currency.toUpperCase() === "KRW" ? Number(priceText.replace(/[^\d.]/g, "")) : NaN;
+  const currency = jsonLd.currency || first("product:price:currency", "og:price:currency", "pricecurrency");
+  const priceText = jsonLd.price ?? first("product:price:amount", "og:price:amount", "price");
+  const numericPrice = priceText.replace(/[,\s₩원]/g, "");
+  const parsedPrice = (currency.toUpperCase() === "KRW" || (!currency && /₩|원/.test(priceText))) && /^\d+(\.\d+)?$/.test(numericPrice) ? Number(numericPrice) : NaN;
 
   const candidates: string[] = [...jsonLd.images];
   for (const key of ["og:image", "og:image:secure_url", "twitter:image", "twitter:image:src"]) candidates.push(...(meta[key] ?? []));
@@ -187,7 +194,7 @@ function getPageDetails(html: string, baseUrl: URL): ProductPage {
   }
 
   return {
-    title, description, price: Number.isFinite(parsedPrice) ? Math.round(parsedPrice) : null,
+    brand, title, description, price: Number.isSafeInteger(parsedPrice) && parsedPrice >= 0 ? parsedPrice : null,
     category: categoryFor(`${title} ${description} ${baseUrl.pathname}`), imageUrls,
   };
 }
@@ -205,7 +212,6 @@ export async function scrapeProductPage(rawUrl: string): Promise<ProductPage> {
   try { html = new TextDecoder(charset).decode(bytes); }
   catch { html = new TextDecoder("utf-8").decode(bytes); }
   const details = getPageDetails(html, finalUrl);
-  if (!details.title) details.title = finalUrl.hostname.replace(/^www\./, "");
   return details;
 }
 

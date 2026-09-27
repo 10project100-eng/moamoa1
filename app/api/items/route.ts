@@ -2,7 +2,7 @@ import { desc, eq } from "drizzle-orm";
 import { env } from "cloudflare:workers";
 import { getChatGPTUser } from "../../chatgpt-auth";
 import { getDb } from "../../../db";
-import { savedItemImages, savedItems } from "../../../db/schema";
+import { priceHistory, savedItemImages, savedItems } from "../../../db/schema";
 import { downloadProductPhoto, scrapeProductPage } from "../../../lib/product-scraper";
 
 const categories = new Set(["의류", "가방", "신발", "액세서리", "뷰티", "기타"]);
@@ -45,7 +45,9 @@ export async function POST(request: Request) {
   try {
     const form = await request.formData();
     const url = String(form.get("url") ?? "").trim().slice(0, 2048);
-    const requestedTitle = String(form.get("title") ?? "").trim().slice(0, 160);
+    const requestedTitle = String(form.get("title") ?? "").trim().slice(0, 300);
+    const brand = String(form.get("brand") ?? "").trim().slice(0, 160);
+    const manualEntry = form.get("manualEntry") === "true";
     const category = String(form.get("category") ?? "기타");
     const note = String(form.get("note") ?? "").trim().slice(0, 600);
     const requestedDescription = String(form.get("sourceDescription") ?? "").trim().slice(0, 1200);
@@ -64,7 +66,7 @@ export async function POST(request: Request) {
         const parsed = new URL(url);
         if (!["http:", "https:"].includes(parsed.protocol)) throw new Error();
       } catch { return Response.json({ error: "http 또는 https로 시작하는 링크를 입력해 주세요." }, { status: 400 }); }
-      try { page = await scrapeProductPage(url); }
+      try { if (!manualEntry) page = await scrapeProductPage(url); }
       catch (error) {
         if (selectedImageUrls.length || !requestedTitle) {
           const message = error instanceof Error ? error.message : "페이지 정보를 읽지 못했어요.";
@@ -75,8 +77,8 @@ export async function POST(request: Request) {
     const title = requestedTitle || page?.title || "";
     if (!title) return Response.json({ error: "상품명을 입력해 주세요." }, { status: 400 });
     if (!categories.has(category)) return Response.json({ error: "카테고리를 확인해 주세요." }, { status: 400 });
-    const price = requestedPrice ?? page?.price ?? null;
-    const sourceDescription = requestedDescription || page?.description || "";
+    const price = requestedPrice;
+    const sourceDescription = requestedDescription;
     if (price !== null && (!Number.isSafeInteger(price) || price < 0)) {
       return Response.json({ error: "가격은 0 이상의 숫자로 입력해 주세요." }, { status: 400 });
     }
@@ -108,10 +110,14 @@ export async function POST(request: Request) {
     }
     itemId = crypto.randomUUID();
     const [item] = await getDb().insert(savedItems).values({
-      id: itemId, userId: user.userId, title, url, category: page && category === "기타" ? page.category : category,
+      id: itemId, userId: user.userId, title, brand, url, category,
       price, note, sourceDescription, imageKey: uploadedCaptureKey,
       createdAt: new Date().toISOString(),
     }).returning();
+    if (price !== null) await getDb().insert(priceHistory).values({
+      id: crypto.randomUUID(), itemId, userId: user.userId, price,
+      source: !manualEntry && page?.price === price ? "crawl" : "manual", recordedAt: item.createdAt,
+    });
     if (photos.length) await getDb().insert(savedItemImages).values(photos.map((photo) => ({ ...photo, itemId: itemId!, userId: user.userId })));
     return Response.json({
       item: { ...item, photos: photos.map((photo) => ({ id: photo.id, url: `/api/items/${item!.id}/photos/${photo.id}` })) },
