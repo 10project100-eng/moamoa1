@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useRef, useState } from "react";
-import { ArrowUpRight, LoaderCircle, RefreshCw, X } from "lucide-react";
+import { ArrowUpRight, LoaderCircle, Pencil, RefreshCw, X } from "lucide-react";
 import type { SavedItem } from "./wishlist";
 
 type PriceRecord = { id: string; price: number; source: string; recordedAt: string };
@@ -32,7 +32,7 @@ function PriceChart({ records }: { records: PriceRecord[] }) {
   </figure>;
 }
 
-export function ItemDetailDialog({ item, onClose, onPriceChanged }: { item: SavedItem; onClose: () => void; onPriceChanged: (price: number) => void }) {
+export function ItemDetailDialog({ item, onEdit, onClose, onPriceChanged }: { item: SavedItem; onEdit: () => void; onClose: () => void; onPriceChanged: (price: number) => void }) {
   const [records, setRecords] = useState<PriceRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -44,7 +44,7 @@ export function ItemDetailDialog({ item, onClose, onPriceChanged }: { item: Save
   const dialog = useRef<HTMLElement>(null);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
-  const photos = [...(item.imageKey ? [{ id: "capture", url: `/api/items/${item.id}/image` }] : []), ...(item.photos ?? [])];
+  const photos = [...(item.imageKey ? [{ id: "capture", url: `/api/items/${item.id}/image?v=${item.imageKey}` }] : []), ...(item.photos ?? [])];
 
   useEffect(() => {
     const previous = document.activeElement as HTMLElement | null;
@@ -97,7 +97,7 @@ export function ItemDetailDialog({ item, onClose, onPriceChanged }: { item: Save
 
   return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <section className="add-dialog detail-dialog" role="dialog" aria-modal="true" aria-labelledby="detail-title" tabIndex={-1} ref={dialog}>
-      <div className="dialog-heading"><div><p className="eyebrow">MY SAVED ITEM</p><p className="detail-brand">{item.brand || "브랜드 미입력"}</p><h2 id="detail-title">{item.title}</h2></div><button className="icon-button" onClick={onClose} aria-label="상세 정보 닫기"><X size={19} /></button></div>
+      <div className="dialog-heading"><div><p className="eyebrow">MY SAVED ITEM</p><p className="detail-brand">{item.brand || "브랜드 미입력"}</p><h2 id="detail-title">{item.title}</h2></div><div className="detail-header-actions"><button className="secondary-button edit-item-button" onClick={onEdit} disabled={busy} aria-label="아이템 수정"><Pencil size={14} /> 수정</button><button className="icon-button" onClick={onClose} aria-label="상세 정보 닫기"><X size={19} /></button></div></div>
       <div className="detail-layout">
         <div className="detail-gallery">{photos.length ? <><img className="detail-main-photo" src={photos[activePhoto]?.url ?? photos[0].url} alt={`${item.title} 저장한 사진`} /><div className="detail-thumbnails">{photos.map((photo, index) => <button key={photo.id} aria-label={`사진 ${index + 1} 보기`} aria-pressed={activePhoto === index} onClick={() => setActivePhoto(index)}><img src={photo.url} alt="" /></button>)}</div></> : <div className="detail-no-photo"><span>✳</span>저장한 사진이 없어요</div>}</div>
         <div className="detail-copy"><span className="detail-category">{item.category}</span><p className="detail-price">{item.price !== null ? `₩${money.format(item.price)}` : "가격 미입력"}</p><p className="detail-date">{latest ? `마지막 가격 기록 ${date(latest.recordedAt)}` : `보관한 날 ${date(item.createdAt)}`}</p><h3>제품 설명</h3><p>{item.sourceDescription || "등록한 설명이 없어요."}</p><h3>내 메모</h3><p>{item.note || "등록한 메모가 없어요."}</p>{item.url && <a className="secondary-button original-link" href={item.url} target="_blank" rel="noopener noreferrer">원래 상품 페이지 열기 <ArrowUpRight size={15} /></a>}</div>
