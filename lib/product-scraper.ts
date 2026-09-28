@@ -176,29 +176,10 @@ function record(value: unknown): Record<string, unknown> {
 
 function text(value: unknown): string { return typeof value === "string" ? value : ""; }
 
-function musinsaDetails(html: string, baseUrl: URL): ProductPage | null {
-  if (!/^(www\.|m\.)?musinsa\.com$/.test(baseUrl.hostname)) return null;
-  const productId = baseUrl.pathname.match(/\/(?:products|goods)\/(\d+)/)?.[1];
-  if (!productId) return null;
-  let page: Record<string, unknown> = {};
-  for (const match of html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
-    if (attributes(match[1]).id !== "__NEXT_DATA__") continue;
-    try { page = record(record(record(JSON.parse(match[2])).props).pageProps); } catch { return null; }
-    break;
-  }
-  const queries = record(page.dehydratedState).queries;
-  let product: Record<string, unknown> = {};
-  if (Array.isArray(queries)) {
-    for (const query of queries.slice(0, 80)) {
-      const candidate = record(record(record(record(query).state).data).data);
-      if (String(candidate.goodsNo) === productId) { product = candidate; break; }
-    }
-  }
-  // Metadata is tied to this page; never use another product from recommendations.
-  if (!text(product.goodsNm)) product = record(record(page.meta).data);
+function musinsaProduct(product: Record<string, unknown>, contentsOverride = ""): ProductPage | null {
   if (!text(product.goodsNm)) return null;
   const brand = text(record(product.brandInfo).brandName);
-  const contents = text(product.goodsContents);
+  const contents = contentsOverride || text(product.goodsContents);
   const candidates: string[] = [text(product.thumbnailImageUrl)];
   if (Array.isArray(product.goodsImages)) for (const value of product.goodsImages.slice(0, 40)) {
     const photo = record(value);
@@ -224,6 +205,54 @@ function musinsaDetails(html: string, baseUrl: URL): ProductPage | null {
     description: plainText(contents || text(record(product.seo).faceBookMetaDescription)).slice(0, 1200),
     price, category: categoryFor(`${text(product.baseCategoryFullPath)} ${text(product.goodsNm)}`), imageUrls,
   };
+}
+
+function musinsaProductId(baseUrl: URL): string | null {
+  if (!/^(www\.|m\.)?musinsa\.com$/.test(baseUrl.hostname)) return null;
+  return baseUrl.pathname.match(/^\/(?:products|goods)\/(\d+)/)?.[1] ?? null;
+}
+
+function musinsaDetails(html: string, baseUrl: URL): ProductPage | null {
+  if (!musinsaProductId(baseUrl)) return null;
+  let page: Record<string, unknown> = {};
+  for (const match of html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
+    if (attributes(match[1]).id !== "__NEXT_DATA__") continue;
+    try { page = record(record(record(JSON.parse(match[2])).props).pageProps); } catch { return null; }
+    break;
+  }
+  const queries = record(page.dehydratedState).queries;
+  const productId = musinsaProductId(baseUrl);
+  let product: Record<string, unknown> = {};
+  if (Array.isArray(queries)) {
+    for (const query of queries.slice(0, 80)) {
+      const candidate = record(record(record(record(query).state).data).data);
+      if (String(candidate.goodsNo) === productId) { product = candidate; break; }
+    }
+  }
+  if (!text(product.goodsNm)) product = record(record(page.meta).data);
+  return musinsaProduct(product);
+}
+
+async function scrapeMusinsaProduct(pageUrl: URL): Promise<ProductPage> {
+  const productId = musinsaProductId(pageUrl);
+  if (!productId) throw new ProductFetchError("무신사 상품 주소를 확인해 주세요.");
+  const { response, finalUrl } = await safeFetch(`https://goods-detail.musinsa.com/api2/goods/${productId}`, "application/json");
+  if (!response.ok || !response.headers.get("content-type")?.toLowerCase().includes("application/json")) {
+    await response.body?.cancel();
+    throw responseError(response, finalUrl);
+  }
+  const bytes = await readLimited(response, maxPageBytes);
+  let payload: Record<string, unknown>;
+  try { payload = record(JSON.parse(new TextDecoder().decode(bytes))); }
+  catch { throw new ProductFetchError("무신사 상품 정보를 읽지 못했어요.", "invalid_product_data"); }
+  const product = record(payload.data);
+  if (String(product.goodsNo) !== productId) throw new ProductFetchError("이 무신사 상품을 찾을 수 없어요.", "not_found", 404);
+  const details = musinsaProduct(product);
+  if (!details) throw new ProductFetchError("무신사 상품 정보를 읽지 못했어요.", "invalid_product_data");
+  // The official product detail API provides exact title, brand, current KRW sale
+  // price, thumbnail and detail photos without requesting the blocked storefront.
+  console.info("Musinsa product imported", { productId, photoCount: details.imageUrls.length });
+  return details;
 }
 
 export function getPageDetails(html: string, baseUrl: URL): ProductPage {
@@ -282,10 +311,18 @@ export function getPageDetails(html: string, baseUrl: URL): ProductPage {
 }
 
 export async function scrapeProductPage(rawUrl: string): Promise<ProductPage> {
-  const { response, finalUrl } = await safeFetch(rawUrl, "text/html,application/xhtml+xml;q=0.9,*/*;q=0.1");
+  const sourceUrl = checkedUrl(rawUrl);
+  let fetched: Awaited<ReturnType<typeof safeFetch>>;
+  try { fetched = await safeFetch(rawUrl, "text/html,application/xhtml+xml;q=0.9,*/*;q=0.1"); }
+  catch (error) {
+    if (musinsaProductId(sourceUrl)) return scrapeMusinsaProduct(sourceUrl);
+    throw error;
+  }
+  const { response, finalUrl } = fetched;
   const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
   if (!response.ok || !(contentType.includes("text/html") || contentType.includes("application/xhtml+xml"))) {
     await response.body?.cancel();
+    if (musinsaProductId(sourceUrl) && response.status === 403) return scrapeMusinsaProduct(sourceUrl);
     throw responseError(response, finalUrl);
   }
   const bytes = await readLimited(response, maxPageBytes);
