@@ -11,7 +11,10 @@ export async function POST(request: Request) {
     const product = await scrapeProductPage(url);
     return Response.json(product);
   } catch (error) {
-    if (error instanceof ProductFetchError) return Response.json({ error: error.message }, { status: 422 });
+    if (error instanceof ProductFetchError) {
+      console.error("Product preview failed", { code: error.code, upstreamStatus: error.upstreamStatus });
+      return Response.json({ error: error.message, code: error.code, upstreamStatus: error.upstreamStatus }, { status: 422 });
+    }
     console.error("Product page preview failed:", error);
     return Response.json({ error: "이 페이지의 정보를 읽지 못했어요. 상품 링크를 직접 입력해 주세요." }, { status: 422 });
   }

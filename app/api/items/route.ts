@@ -3,7 +3,7 @@ import { env } from "cloudflare:workers";
 import { getChatGPTUser } from "../../chatgpt-auth";
 import { getDb } from "../../../db";
 import { priceHistory, savedItemImages, savedItems } from "../../../db/schema";
-import { downloadProductPhoto, scrapeProductPage } from "../../../lib/product-scraper";
+import { downloadProductPhoto, MAX_IMPORTED_PHOTOS, scrapeProductPage } from "../../../lib/product-scraper";
 import { validatePhotoFiles } from "../../../lib/photo-upload";
 
 const categories = new Set(["의류", "가방", "신발", "액세서리", "뷰티", "기타"]);
@@ -61,7 +61,7 @@ export async function POST(request: Request) {
     let selectedImageUrls: string[] = [];
     try {
       const value = JSON.parse(String(form.get("imageUrls") ?? "[]"));
-      if (Array.isArray(value)) selectedImageUrls = value.filter((entry): entry is string => typeof entry === "string").slice(0, 6);
+      if (Array.isArray(value)) selectedImageUrls = [...new Set(value.filter((entry): entry is string => typeof entry === "string"))].slice(0, MAX_IMPORTED_PHOTOS);
     } catch { return Response.json({ error: "사진 선택 정보를 확인해 주세요." }, { status: 400 }); }
     const photoError = validatePhotoFiles([...files, ...(image instanceof File && image.size > 0 ? [image] : [])], selectedImageUrls.length);
     if (photoError) return Response.json({ error: photoError }, { status: 400 });

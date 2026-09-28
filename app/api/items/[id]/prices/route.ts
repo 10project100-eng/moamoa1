@@ -2,7 +2,7 @@ import { and, asc, eq } from "drizzle-orm";
 import { getChatGPTUser } from "../../../../chatgpt-auth";
 import { getDb } from "../../../../../db";
 import { priceHistory, savedItems } from "../../../../../db/schema";
-import { scrapeProductPage } from "../../../../../lib/product-scraper";
+import { ProductFetchError, scrapeProductPage } from "../../../../../lib/product-scraper";
 
 type Context = { params: Promise<{ id: string }> };
 
@@ -43,7 +43,7 @@ export async function POST(request: Request, { params }: Context) {
     if (body.mode === "crawl") {
       if (!item.url) return Response.json({ error: "상품 링크가 없어요. 가격을 직접 기록해 주세요." }, { status: 422 });
       try { price = (await scrapeProductPage(item.url)).price; }
-      catch { return Response.json({ error: "사이트에서 가격을 가져오지 못했어요. 확인한 가격을 직접 기록해 주세요." }, { status: 422 }); }
+      catch (error) { return Response.json({ error: error instanceof ProductFetchError ? error.message : "사이트에서 가격을 가져오지 못했어요. 확인한 가격을 직접 기록해 주세요." }, { status: 422 }); }
       if (price === null) return Response.json({ error: "원화 판매가격을 확인하지 못했어요. 가격을 직접 기록해 주세요." }, { status: 422 });
     } else {
       price = typeof body.price === "number" ? body.price : null;

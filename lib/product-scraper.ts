@@ -1,5 +1,6 @@
 const maxPageBytes = 2 * 1024 * 1024;
-const maxPhotoBytes = 4 * 1024 * 1024;
+const maxPhotoBytes = 10 * 1024 * 1024;
+export const MAX_IMPORTED_PHOTOS = 20;
 const allowedImageTypes = new Set(["image/jpeg", "image/png", "image/webp", "image/gif", "image/avif"]);
 const redirectStatuses = new Set([301, 302, 303, 307, 308]);
 
@@ -12,7 +13,20 @@ export type ProductPage = {
   imageUrls: string[];
 };
 
-export class ProductFetchError extends Error {}
+export class ProductFetchError extends Error {
+  constructor(message: string, public code = "invalid_page", public upstreamStatus?: number) {
+    super(message);
+    this.name = "ProductFetchError";
+  }
+}
+
+function responseError(response: Response, url: URL): ProductFetchError {
+  console.error("Product source rejected request", { host: url.hostname, status: response.status, contentType: response.headers.get("content-type") });
+  if (response.status === 401 || response.status === 403) return new ProductFetchError("상품 사이트가 모아봄의 접근을 제한했어요. 직접 입력하거나 사진을 올려 저장할 수 있어요.", "access_denied", response.status);
+  if (response.status === 429) return new ProductFetchError("상품 사이트의 요청 제한에 걸렸어요. 잠시 후 다시 가져와 주세요.", "rate_limited", 429);
+  if (response.status === 404 || response.status === 410) return new ProductFetchError("상품 페이지가 삭제되었거나 주소가 바뀌었어요.", "not_found", response.status);
+  return new ProductFetchError(`상품 사이트에서 정보를 읽지 못했어요. (응답 ${response.status})`, "source_error", response.status);
+}
 
 function checkedUrl(raw: string): URL {
   let url: URL;
@@ -37,12 +51,22 @@ function checkedUrl(raw: string): URL {
 async function safeFetch(rawUrl: string, accept: string): Promise<{ response: Response; finalUrl: URL }> {
   let url = checkedUrl(rawUrl);
   for (let redirects = 0; redirects <= 4; redirects++) {
-    const response = await fetch(url, {
+    let response: Response;
+    try { response = await fetch(url.toString(), {
       method: "GET",
       redirect: "manual",
-      headers: { Accept: accept },
-      signal: AbortSignal.timeout(8000),
-    });
+      headers: {
+        Accept: accept,
+        "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.5",
+        "User-Agent": "Mozilla/5.0 (compatible; MoaBom/1.0; +https://moabom-wish.sj50507337.chatgpt.site)",
+      },
+      signal: AbortSignal.timeout(12000),
+    }); } catch (error) {
+      const name = error instanceof Error ? error.name : "Error";
+      console.error("Product source connection failed", { host: url.hostname, name });
+      if (name === "TimeoutError" || name === "AbortError") throw new ProductFetchError("상품 사이트 응답이 늦어 중단됐어요. 다시 가져오기를 눌러 주세요.", "timeout");
+      throw new ProductFetchError("상품 사이트에 연결하지 못했어요. 잠시 후 다시 가져와 주세요.", "connection_failed");
+    }
     if (!redirectStatuses.has(response.status)) return { response, finalUrl: url };
     const location = response.headers.get("location");
     await response.body?.cancel();
@@ -109,7 +133,7 @@ function categoryFor(value: string): ProductPage["category"] {
   if (/bag|handbag|backpack|가방|토트|숄더백/.test(text)) return "가방";
   if (/shoe|sneaker|boots|heel|sandals|신발|운동화|부츠|구두/.test(text)) return "신발";
   if (/beauty|cosmetic|skincare|makeup|뷰티|화장품|스킨케어/.test(text)) return "뷰티";
-  if (/jewel|watch|accessor|액세서리|악세서리|주얼리|시계|목걸이|귀걸이/.test(text)) return "액세서리";
+  if (/jewel|watch|accessor|belt|액세서리|악세서리|주얼리|시계|목걸이|귀걸이|벨트/.test(text)) return "액세서리";
   if (/clothing|apparel|fashion|의류|옷|셔츠|바지|원피스|코트|재킷|니트/.test(text)) return "의류";
   return "기타";
 }
@@ -146,7 +170,65 @@ function findProducts(value: unknown, product: { brand?: string; name?: string; 
   }
 }
 
+function record(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function text(value: unknown): string { return typeof value === "string" ? value : ""; }
+
+function musinsaDetails(html: string, baseUrl: URL): ProductPage | null {
+  if (!/^(www\.|m\.)?musinsa\.com$/.test(baseUrl.hostname)) return null;
+  const productId = baseUrl.pathname.match(/\/(?:products|goods)\/(\d+)/)?.[1];
+  if (!productId) return null;
+  let page: Record<string, unknown> = {};
+  for (const match of html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
+    if (attributes(match[1]).id !== "__NEXT_DATA__") continue;
+    try { page = record(record(record(JSON.parse(match[2])).props).pageProps); } catch { return null; }
+    break;
+  }
+  const queries = record(page.dehydratedState).queries;
+  let product: Record<string, unknown> = {};
+  if (Array.isArray(queries)) {
+    for (const query of queries.slice(0, 80)) {
+      const candidate = record(record(record(record(query).state).data).data);
+      if (String(candidate.goodsNo) === productId) { product = candidate; break; }
+    }
+  }
+  // Metadata is tied to this page; never use another product from recommendations.
+  if (!text(product.goodsNm)) product = record(record(page.meta).data);
+  if (!text(product.goodsNm)) return null;
+  const brand = text(record(product.brandInfo).brandName);
+  const contents = text(product.goodsContents);
+  const candidates: string[] = [text(product.thumbnailImageUrl)];
+  if (Array.isArray(product.goodsImages)) for (const value of product.goodsImages.slice(0, 40)) {
+    const photo = record(value);
+    candidates.push(typeof value === "string" ? value : text(photo.imageUrl) || text(photo.goodsImageUrl) || text(photo.url));
+  }
+  const contentImages = [...contents.matchAll(/<img\b[^>]*>/gi)].map((match) => attributes(match[0]));
+  // Product-labelled detail images precede generic shop notices and size guides.
+  contentImages.sort((a, b) => Number(text(b.alt).includes(text(product.goodsNm))) - Number(text(a.alt).includes(text(product.goodsNm))));
+  for (const attrs of contentImages) candidates.push(attrs["data-original"] || attrs["data-src"] || attrs.src || "");
+  const imageUrls: string[] = [];
+  for (const value of candidates) {
+    if (!value || imageUrls.length >= MAX_IMPORTED_PHOTOS || /\/_brand\/|\/brand\/|logo|banner|icon/i.test(value)) continue;
+    try {
+      const image = checkedUrl(new URL(value, "https://image.msscdn.net").toString()).toString();
+      if (!imageUrls.includes(image)) imageUrls.push(image);
+    } catch { /* Ignore unsupported image sources. */ }
+  }
+  const priceData = record(product.goodsPrice);
+  const salePrice = Number(priceData.salePrice);
+  const price = priceData.currency === "KRW" && priceData.salePrice != null && Number.isSafeInteger(salePrice) && salePrice >= 0 ? salePrice : null;
+  return {
+    brand: decode(brand).slice(0, 160), title: decode(text(product.goodsNm)).slice(0, 300),
+    description: plainText(contents || text(record(product.seo).faceBookMetaDescription)).slice(0, 1200),
+    price, category: categoryFor(`${text(product.baseCategoryFullPath)} ${text(product.goodsNm)}`), imageUrls,
+  };
+}
+
 export function getPageDetails(html: string, baseUrl: URL): ProductPage {
+  const musinsa = musinsaDetails(html, baseUrl);
+  if (musinsa) return musinsa;
   const meta: Record<string, string[]> = {};
   for (const tag of html.match(/<meta\b[^>]*>/gi) ?? []) {
     const attrs = attributes(tag);
@@ -178,7 +260,7 @@ export function getPageDetails(html: string, baseUrl: URL): ProductPage {
     const width = Number(attrs.width ?? 0), height = Number(attrs.height ?? 0);
     if ((width > 0 && width < 240) || (height > 0 && height < 240)) continue;
     const hint = `${attrs.alt ?? ""} ${source}`.toLowerCase();
-    if (/logo|icon|sprite|avatar|profile|badge|payment|banner/.test(hint)) continue;
+    if (/logo|icon|sprite|avatar|profile|badge|payment|banner|\/_brand\//.test(hint)) continue;
     const priority = (width >= 500 ? 2 : 0) + (/product|goods|item|detail|main|thumb|상품|제품/.test(hint) ? 3 : 0);
     imageTagCandidates.push({ url: source, priority });
   }
@@ -186,7 +268,7 @@ export function getPageDetails(html: string, baseUrl: URL): ProductPage {
   candidates.push(...imageTagCandidates.map((candidate) => candidate.url));
   const imageUrls: string[] = [];
   for (const candidate of candidates) {
-    if (imageUrls.length >= 6) break;
+    if (imageUrls.length >= MAX_IMPORTED_PHOTOS) break;
     try {
       const url = checkedUrl(new URL(candidate, baseUrl).toString()).toString();
       if (!imageUrls.includes(url)) imageUrls.push(url);
@@ -204,7 +286,7 @@ export async function scrapeProductPage(rawUrl: string): Promise<ProductPage> {
   const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
   if (!response.ok || !(contentType.includes("text/html") || contentType.includes("application/xhtml+xml"))) {
     await response.body?.cancel();
-    throw new ProductFetchError("이 페이지에서 상품 정보를 읽을 수 없어요. 링크를 확인해 주세요.");
+    throw responseError(response, finalUrl);
   }
   const bytes = await readLimited(response, maxPageBytes);
   const charset = contentType.match(/charset\s*=\s*["']?([^;\s"']+)/i)?.[1] ?? "utf-8";
@@ -212,15 +294,18 @@ export async function scrapeProductPage(rawUrl: string): Promise<ProductPage> {
   try { html = new TextDecoder(charset).decode(bytes); }
   catch { html = new TextDecoder("utf-8").decode(bytes); }
   const details = getPageDetails(html, finalUrl);
+  if (!details.title || (/access denied|just a moment|robot check|접근.*차단/i.test(details.title) && !details.brand && details.price === null)) {
+    throw new ProductFetchError("상품 사이트가 확인 화면을 표시해 자동으로 읽지 못했어요. 직접 입력하거나 사진을 올려 주세요.", "verification_required");
+  }
   return details;
 }
 
 export async function downloadProductPhoto(rawUrl: string): Promise<{ bytes: Uint8Array; contentType: string }> {
-  const { response } = await safeFetch(rawUrl, "image/avif,image/webp,image/png,image/jpeg,image/gif;q=0.9,*/*;q=0.1");
+  const { response, finalUrl } = await safeFetch(rawUrl, "image/avif,image/webp,image/png,image/jpeg,image/gif;q=0.9,*/*;q=0.1");
   const contentType = response.headers.get("content-type")?.split(";")[0].trim().toLowerCase() ?? "";
   if (!response.ok || !allowedImageTypes.has(contentType)) {
     await response.body?.cancel();
-    throw new ProductFetchError("상품 사진을 가져오지 못했어요.");
+    throw responseError(response, finalUrl);
   }
   return { bytes: await readLimited(response, maxPhotoBytes), contentType };
 }

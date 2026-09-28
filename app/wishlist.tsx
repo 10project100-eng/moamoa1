@@ -154,6 +154,7 @@ function AddItemDialog({ initialItem, onClose, onSaved }: { initialItem?: SavedI
   const [title, setTitle] = useState(initialItem?.title ?? "");
   const [brand, setBrand] = useState(initialItem?.brand ?? "");
   const [manualEntry, setManualEntry] = useState(Boolean(initialItem));
+  const [previewAttempt, setPreviewAttempt] = useState(0);
   const [url, setUrl] = useState(initialItem?.url ?? "");
   const [category, setCategory] = useState<Category>(initialItem?.category ?? "기타");
   const [price, setPrice] = useState(initialItem?.price == null ? "" : String(initialItem.price));
@@ -203,7 +204,7 @@ function AddItemDialog({ initialItem, onClose, onSaved }: { initialItem?: SavedI
         const data = await response.json() as ScrapedPreview & { error?: string };
         if (!response.ok) throw new Error(data.error ?? "페이지를 읽지 못했어요.");
         const result = data as ScrapedPreview;
-        setPagePreview(result); setSelectedImages(result.imageUrls);
+        setPagePreview(result); setSelectedImages(result.imageUrls.slice(0, Math.max(0, MAX_PHOTOS - uploads.length - existingPhotoCount)));
         if (!manualFields.current.title) setTitle(result.title);
         if (!manualFields.current.brand) setBrand(result.brand);
         if (!manualFields.current.category) setCategory(result.category);
@@ -214,11 +215,11 @@ function AddItemDialog({ initialItem, onClose, onSaved }: { initialItem?: SavedI
       } catch (reason) {
         if (controller?.signal.aborted) return;
         setPagePreview(null); setSelectedImages([]); setPreviewState("error");
-        setPreviewMessage("상품 정보를 가져오지 못했어요. 아래 칸에 브랜드와 제품명을 직접 입력하면 저장할 수 있어요.");
+        setPreviewMessage(reason instanceof Error ? reason.message : "상품 정보를 가져오지 못했어요. 아래 칸에 직접 입력하면 저장할 수 있어요.");
       }
     }, 700);
     return () => { window.clearTimeout(timer); controller?.abort(); };
-  }, [url, manualEntry]);
+  }, [url, manualEntry, previewAttempt]);
 
   useEffect(() => {
     const previous = document.activeElement as HTMLElement | null;
@@ -291,8 +292,9 @@ function AddItemDialog({ initialItem, onClose, onSaved }: { initialItem?: SavedI
           <div className="input-with-icon"><Link2 size={17} /><input id="item-url" type="url" className="form-input" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https:// 마음에 든 페이지 주소" /></div>
           {!initialItem && <label className="manual-toggle"><input type="checkbox" checked={manualEntry} onChange={(event) => setManualEntry(event.target.checked)} /> 직접 입력하기 <span>자동으로 가져올 수 없는 사이트도 저장할 수 있어요.</span></label>}
           {!!previewMessage && <div className={`import-status import-${previewState}`} role="status">{previewState === "loading" && <LoaderCircle size={14} className="spin" />}{previewState === "ready" && <Check size={14} />}{previewState === "error" && <span className="import-warning">!</span>}<span>{previewMessage}</span></div>}
+          {previewState === "error" && !manualEntry && <button type="button" className="text-button" onClick={() => setPreviewAttempt((current) => current + 1)}>다시 가져오기</button>}
 
-          {pagePreview?.imageUrls.length ? <div className="scraped-photos" aria-label="저장할 상품 사진 선택">{pagePreview.imageUrls.map((photoUrl, index) => <label className={`scraped-photo ${selectedImages.includes(photoUrl) ? "scraped-photo-selected" : ""}`} key={photoUrl}><img src={photoUrl} alt={`페이지에서 찾은 상품 사진 ${index + 1}`} loading="lazy" /><input type="checkbox" checked={selectedImages.includes(photoUrl)} onChange={(event) => setSelectedImages((current) => event.target.checked ? [...current, photoUrl].slice(0, 6) : current.filter((value) => value !== photoUrl))} /><span className="photo-check"><Check size={11} /></span></label>)}</div> : null}
+          {pagePreview?.imageUrls.length ? <div className="scraped-photos" aria-label="저장할 상품 사진 선택">{pagePreview.imageUrls.map((photoUrl, index) => <label className={`scraped-photo ${selectedImages.includes(photoUrl) ? "scraped-photo-selected" : ""}`} key={photoUrl}><img src={photoUrl} alt={`페이지에서 찾은 상품 사진 ${index + 1}`} loading="lazy" /><input type="checkbox" checked={selectedImages.includes(photoUrl)} onChange={(event) => setSelectedImages((current) => event.target.checked ? [...current, photoUrl].slice(0, Math.max(0, MAX_PHOTOS - uploads.length - existingPhotoCount)) : current.filter((value) => value !== photoUrl))} /><span className="photo-check"><Check size={11} /></span></label>)}</div> : null}
 
           <label className="field-label" htmlFor="item-brand">브랜드 <span className="optional">직접 입력·수정 가능</span></label>
           <input id="item-brand" className="form-input" maxLength={160} value={brand} onChange={(event) => { setBrand(event.target.value); manualFields.current.brand = true; }} placeholder="페이지에 표시된 브랜드명" />
