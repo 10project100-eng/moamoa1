@@ -1,4 +1,7 @@
-const maxPageBytes = 2 * 1024 * 1024;
+// Product HTML often includes large inline hydration data and JSON-LD.
+// Keep a bounded budget so image-heavy product pages are readable without
+// allowing an unbounded response to consume Worker memory.
+const maxPageBytes = 10 * 1024 * 1024;
 const maxPhotoBytes = 10 * 1024 * 1024;
 export const MAX_IMPORTED_PHOTOS = 20;
 const allowedImageTypes = new Set(["image/jpeg", "image/png", "image/webp", "image/gif", "image/avif"]);
@@ -76,9 +79,9 @@ async function safeFetch(rawUrl: string, accept: string): Promise<{ response: Re
   throw new ProductFetchError("페이지를 불러오지 못했어요.");
 }
 
-async function readLimited(response: Response, limit: number): Promise<Uint8Array> {
+async function readLimited(response: Response, limit: number, tooLargeMessage: string): Promise<Uint8Array> {
   const advertised = Number(response.headers.get("content-length"));
-  if (Number.isFinite(advertised) && advertised > limit) throw new ProductFetchError("페이지 용량이 커서 정보를 읽지 못했어요.");
+  if (Number.isFinite(advertised) && advertised > limit) throw new ProductFetchError(tooLargeMessage, "response_too_large");
   if (!response.body) return new Uint8Array();
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -90,7 +93,7 @@ async function readLimited(response: Response, limit: number): Promise<Uint8Arra
       size += value.byteLength;
       if (size > limit) {
         await reader.cancel();
-        throw new ProductFetchError("페이지 용량이 커서 정보를 읽지 못했어요.");
+        throw new ProductFetchError(tooLargeMessage, "response_too_large");
       }
       chunks.push(value);
     }
@@ -241,7 +244,7 @@ async function scrapeMusinsaProduct(pageUrl: URL): Promise<ProductPage> {
     await response.body?.cancel();
     throw responseError(response, finalUrl);
   }
-  const bytes = await readLimited(response, maxPageBytes);
+  const bytes = await readLimited(response, maxPageBytes, "상품 정보가 10MB를 넘어 자동으로 읽지 못했어요. 사진 압축 대신 상품 링크를 다시 확인하거나 필요한 사진만 직접 올려 주세요.");
   let payload: Record<string, unknown>;
   try { payload = record(JSON.parse(new TextDecoder().decode(bytes))); }
   catch { throw new ProductFetchError("무신사 상품 정보를 읽지 못했어요.", "invalid_product_data"); }
@@ -325,7 +328,7 @@ export async function scrapeProductPage(rawUrl: string): Promise<ProductPage> {
     if (musinsaProductId(sourceUrl) && response.status === 403) return scrapeMusinsaProduct(sourceUrl);
     throw responseError(response, finalUrl);
   }
-  const bytes = await readLimited(response, maxPageBytes);
+  const bytes = await readLimited(response, maxPageBytes, "무신사 상품 정보가 10MB를 넘어 자동으로 읽지 못했어요.");
   const charset = contentType.match(/charset\s*=\s*["']?([^;\s"']+)/i)?.[1] ?? "utf-8";
   let html: string;
   try { html = new TextDecoder(charset).decode(bytes); }
@@ -344,5 +347,5 @@ export async function downloadProductPhoto(rawUrl: string): Promise<{ bytes: Uin
     await response.body?.cancel();
     throw responseError(response, finalUrl);
   }
-  return { bytes: await readLimited(response, maxPhotoBytes), contentType };
+  return { bytes: await readLimited(response, maxPhotoBytes, "상품 사진이 10MB를 넘어 저장하지 못했어요. 작은 사진을 선택하거나 직접 업로드해 주세요."), contentType };
 }
