@@ -51,8 +51,22 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     const files = uploads as File[];
     const image = form.get("image");
     const replacement = image instanceof File && image.size > 0 ? image : null;
+    const requestedCoverPhotoId = String(form.get("coverPhotoId") ?? "");
+    const rawCoverUploadIndex = String(form.get("coverPhotoUploadIndex") ?? "");
     const photoError = validatePhotoFiles([...files, ...(replacement ? [replacement] : [])], keptPhotos.length + (item.imageKey && !removeCapture && !replacement ? 1 : 0));
     if (photoError) return Response.json({ error: photoError }, { status: 400 });
+    const hasCoverSelection = form.has("coverPhotoId") || form.has("coverPhotoUploadIndex");
+    let coverUploadIndex = -1;
+    if (hasCoverSelection) {
+      if (rawCoverUploadIndex) {
+        coverUploadIndex = Number(rawCoverUploadIndex);
+        if (!/^\d+$/.test(rawCoverUploadIndex) || !Number.isSafeInteger(coverUploadIndex) || coverUploadIndex >= files.length) {
+          return Response.json({ error: "대표 사진 선택을 확인해 주세요." }, { status: 400 });
+        }
+      } else if (requestedCoverPhotoId && !(requestedCoverPhotoId === "capture" && (replacement || (item.imageKey && !removeCapture))) && !keptPhotos.some((photo) => photo.id === requestedCoverPhotoId)) {
+        return Response.json({ error: "대표 사진 선택을 확인해 주세요." }, { status: 400 });
+      }
+    }
     if (image instanceof File && image.size > 0) {
       if (!["image/jpeg", "image/png", "image/webp", "image/gif", "image/avif"].includes(image.type) || image.size > 10 * 1024 * 1024) {
         return Response.json({ error: "사진은 JPG, PNG, WEBP, GIF, AVIF 형식의 10MB 이하 파일을 선택해 주세요." }, { status: 400 });
@@ -71,7 +85,9 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
       await env.BUCKET!.put(imageKey, file.stream(), { httpMetadata: { contentType: file.type } });
       newPhotos.push({ id: crypto.randomUUID(), itemId: id, userId: user.userId, imageKey, contentType: file.type, sourceUrl: "", position: nextPosition + index });
     }
-    const update = db.update(savedItems).set({ title, brand, url, category, price, note, sourceDescription, imageKey: uploadedKey ?? (removeCapture ? null : item.imageKey) }).where(owned).returning();
+    let coverPhotoId = item.coverPhotoId;
+    if (hasCoverSelection) coverPhotoId = coverUploadIndex >= 0 ? newPhotos[coverUploadIndex].id : requestedCoverPhotoId || null;
+    const update = db.update(savedItems).set({ title, brand, url, category, price, note, sourceDescription, imageKey: uploadedKey ?? (removeCapture ? null : item.imageKey), coverPhotoId }).where(owned).returning();
     const results = await db.batch([
       update,
       ...(price !== null && price !== item.price ? [db.insert(priceHistory).values({ id: crypto.randomUUID(), itemId: id, userId: user.userId, price, source: "manual", recordedAt: new Date().toISOString() })] : []),

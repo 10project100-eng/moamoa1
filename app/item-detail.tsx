@@ -33,19 +33,18 @@ function PriceChart({ records }: { records: PriceRecord[] }) {
 }
 
 export function ItemDetailDialog({ item, onEdit, onClose, onPriceChanged }: { item: SavedItem; onEdit: () => void; onClose: () => void; onPriceChanged: (price: number) => void }) {
+  const photos = [...(item.imageKey ? [{ id: "capture", url: `/api/items/${item.id}/image?v=${item.imageKey}` }] : []), ...(item.photos ?? [])];
   const [records, setRecords] = useState<PriceRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [manualPrice, setManualPrice] = useState("");
-  const [activePhoto, setActivePhoto] = useState(0);
+  const [activePhoto, setActivePhoto] = useState(() => Math.max(0, photos.findIndex((photo) => photo.id === item.coverPhotoId)));
   const [reload, setReload] = useState(0);
   const dialog = useRef<HTMLElement>(null);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
-  const photos = [...(item.imageKey ? [{ id: "capture", url: `/api/items/${item.id}/image?v=${item.imageKey}` }] : []), ...(item.photos ?? [])];
-
   useEffect(() => {
     const previous = document.activeElement as HTMLElement | null;
     const overflow = document.body.style.overflow;

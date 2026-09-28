@@ -1,0 +1,1 @@
+ALTER TABLE `saved_items` ADD `cover_photo_id` text;

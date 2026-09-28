@@ -8,7 +8,7 @@ import { MAX_PHOTOS, PHOTO_TYPES, validatePhotoFiles } from "../lib/photo-upload
 type Category = "의류" | "가방" | "신발" | "액세서리" | "뷰티" | "기타";
 export type SavedItem = {
   id: string; title: string; brand: string; url: string; category: Category; price: number | null;
-  note: string; sourceDescription?: string; imageKey: string | null; createdAt: string;
+  note: string; sourceDescription?: string; imageKey: string | null; coverPhotoId?: string | null; createdAt: string;
   photos?: { id: string; url: string }[];
 };
 type ScrapedPreview = { brand: string; title: string; description: string; price: number | null; category: Category; imageUrls: string[] };
@@ -116,7 +116,7 @@ export function Wishlist({ displayName }: { displayName: string }) {
               {visibleItems.map((item, index) => (
                 <article className="item-card" key={item.id} style={{ animationDelay: `${Math.min(index * 45, 300)}ms` }}>
                   <div className={`item-cover cover-${index % 5}`}>
-                    {item.imageKey || item.photos?.length ? <img src={item.imageKey ? `/api/items/${item.id}/image?v=${item.imageKey}` : item.photos?.[0]?.url} alt={`${item.title} 상품 사진`} /> : <div className="cover-placeholder"><span className="placeholder-spark">✳</span><span>{item.category}</span></div>}
+                    {item.imageKey || item.photos?.length ? <img src={item.coverPhotoId === "capture" && item.imageKey ? `/api/items/${item.id}/image?v=${item.imageKey}` : item.photos?.find((photo) => photo.id === item.coverPhotoId)?.url ?? (item.imageKey ? `/api/items/${item.id}/image?v=${item.imageKey}` : item.photos?.[0]?.url)} alt={`${item.title} 상품 사진`} /> : <div className="cover-placeholder"><span className="placeholder-spark">✳</span><span>{item.category}</span></div>}
                     <span className="item-category">{item.category}</span>
                     {!!(item.photos?.length || item.imageKey) && <span className="photo-count">사진 {(item.photos?.length ?? 0) + (item.imageKey ? 1 : 0)}장</span>}
                     <button className="delete-button" aria-label={`${item.title} 삭제`} disabled={removing === item.id} onClick={() => void removeItem(item)}>{removing === item.id ? <LoaderCircle size={16} className="spin" /> : <Trash2 size={16} />}</button>
@@ -168,9 +168,12 @@ function AddItemDialog({ initialItem, onClose, onSaved }: { initialItem?: SavedI
   const [uploads, setUploads] = useState<{ id: string; file: File; url: string }[]>([]);
   const [removedPhotoIds, setRemovedPhotoIds] = useState<string[]>([]);
   const [removeCapture, setRemoveCapture] = useState(false);
+  const [representativePhotoId, setRepresentativePhotoId] = useState(initialItem?.coverPhotoId ?? (initialItem?.imageKey ? "capture" : initialItem?.photos?.[0]?.id ?? ""));
   const uploadUrls = useRef(new Set<string>());
   const savedPhotos = (initialItem?.photos ?? []).filter((photo) => !removedPhotoIds.includes(photo.id));
   const hasCapture = Boolean(initialItem?.imageKey && !removeCapture);
+  const photoIds = [...(hasCapture ? ["capture"] : []), ...savedPhotos.map((photo) => photo.id), ...uploads.map((upload) => upload.id)];
+  const activeRepresentativePhotoId = photoIds.includes(representativePhotoId) ? representativePhotoId : photoIds[0] ?? "";
   const existingPhotoCount = savedPhotos.length + (hasCapture ? 1 : 0);
   const photoCount = existingPhotoCount + uploads.length + selectedImages.length;
   const [error, setError] = useState("");
@@ -273,6 +276,11 @@ function AddItemDialog({ initialItem, onClose, onSaved }: { initialItem?: SavedI
     for (const upload of uploads) form.append("images", upload.file);
     form.set("removePhotoIds", JSON.stringify(removedPhotoIds));
     form.set("removeCapture", String(removeCapture));
+    if (initialItem) {
+      form.set("coverPhotoId", uploads.some((upload) => upload.id === activeRepresentativePhotoId) ? "" : activeRepresentativePhotoId);
+      const coverUploadIndex = uploads.findIndex((upload) => upload.id === activeRepresentativePhotoId);
+      form.set("coverPhotoUploadIndex", coverUploadIndex < 0 ? "" : String(coverUploadIndex));
+    }
     try {
       const response = await fetch(initialItem ? `/api/items/${initialItem.id}` : "/api/items", { method: initialItem ? "PATCH" : "POST", body: form });
       const data = await response.json() as { item: SavedItem; error?: string; warning?: string };
@@ -313,12 +321,13 @@ function AddItemDialog({ initialItem, onClose, onSaved }: { initialItem?: SavedI
           <div className="field-label">사진·캡처 <span className="optional">{photoCount} / {MAX_PHOTOS}장 · 한 장당 10MB 이하</span></div>
           <input ref={fileRef} type="file" multiple accept={PHOTO_TYPES.join(",")} aria-label="사진 여러 장 선택" className="visually-hidden" onChange={chooseFile} />
           {(hasCapture || savedPhotos.length > 0 || uploads.length > 0) && <div className="upload-photo-grid" aria-label="보관할 사진 목록">
-            {hasCapture && initialItem && <div className="upload-photo"><img src={`/api/items/${initialItem.id}/image?v=${initialItem.imageKey}`} alt="기존 캡처" /><span>보관 중</span><button type="button" className="photo-remove" aria-label="기존 캡처 빼기" onClick={() => { setRemoveCapture(true); setError(""); }}><X size={13} /></button></div>}
-            {savedPhotos.map((photo, index) => <div className="upload-photo" key={photo.id}><img src={photo.url} alt={`보관 중인 사진 ${index + 1}`} /><span>보관 중</span><button type="button" className="photo-remove" aria-label={`보관 중인 사진 ${index + 1} 빼기`} onClick={() => { setRemovedPhotoIds((current) => [...current, photo.id]); setError(""); }}><X size={13} /></button></div>)}
-            {uploads.map((upload, index) => <div className="upload-photo" key={upload.id}><img src={upload.url} alt={`추가할 사진 ${index + 1}: ${upload.file.name}`} /><span title={upload.file.name}>{upload.file.name}</span><button type="button" className="photo-remove" aria-label={`${upload.file.name} 빼기`} onClick={() => removeUpload(upload.id)}><X size={13} /></button></div>)}
+            {hasCapture && initialItem && <div className={`upload-photo ${activeRepresentativePhotoId === "capture" ? "upload-photo-representative" : ""}`}><img src={`/api/items/${initialItem.id}/image?v=${initialItem.imageKey}`} alt="기존 캡처" /><button type="button" className="cover-photo-select" aria-label="캡처를 대표 사진으로 설정" aria-pressed={activeRepresentativePhotoId === "capture"} onClick={() => setRepresentativePhotoId("capture")}>{activeRepresentativePhotoId === "capture" && <span className="cover-photo-badge">대표</span>}</button><span>캡처</span><button type="button" className="photo-remove" aria-label="기존 캡처 빼기" onClick={() => { setRemoveCapture(true); setError(""); }}><X size={13} /></button></div>}
+            {savedPhotos.map((photo, index) => <div className={`upload-photo ${activeRepresentativePhotoId === photo.id ? "upload-photo-representative" : ""}`} key={photo.id}><img src={photo.url} alt={`보관 중인 사진 ${index + 1}`} /><button type="button" className="cover-photo-select" aria-label={`사진 ${index + 1}을 대표 사진으로 설정`} aria-pressed={activeRepresentativePhotoId === photo.id} onClick={() => setRepresentativePhotoId(photo.id)}>{activeRepresentativePhotoId === photo.id && <span className="cover-photo-badge">대표</span>}</button><span>보관 중</span><button type="button" className="photo-remove" aria-label={`보관 중인 사진 ${index + 1} 빼기`} onClick={() => { setRemovedPhotoIds((current) => [...current, photo.id]); setError(""); }}><X size={13} /></button></div>)}
+            {uploads.map((upload, index) => <div className={`upload-photo ${activeRepresentativePhotoId === upload.id ? "upload-photo-representative" : ""}`} key={upload.id}><img src={upload.url} alt={`추가할 사진 ${index + 1}: ${upload.file.name}`} /><button type="button" className="cover-photo-select" aria-label={`${upload.file.name}을 대표 사진으로 설정`} aria-pressed={activeRepresentativePhotoId === upload.id} onClick={() => setRepresentativePhotoId(upload.id)}>{activeRepresentativePhotoId === upload.id && <span className="cover-photo-badge">대표</span>}</button><span title={upload.file.name}>{upload.file.name}</span><button type="button" className="photo-remove" aria-label={`${upload.file.name} 빼기`} onClick={() => removeUpload(upload.id)}><X size={13} /></button></div>)}
           </div>}
           <button type="button" className="upload-box" disabled={photoCount >= MAX_PHOTOS} onClick={() => fileRef.current?.click()}><span className="upload-icon"><ImagePlus size={19} /></span><span><strong>사진 여러 장 추가하기</strong><small>JPG, PNG, WEBP, GIF, AVIF · 한 번에 최대 40MB</small></span><span className="upload-action">파일 선택</span></button>
           {initialItem && <p className="edit-help">사진 추가·삭제는 ‘수정 내용 저장’을 누르면 적용돼요.</p>}
+          {initialItem && photoCount > 0 && <p className="edit-help">사진을 누르면 대표 사진을 바꿀 수 있어요. 사진 순서는 유지됩니다.</p>}
           {error && <p className="form-error" role="alert">{error}</p>}
           <div className="dialog-actions"><button type="button" className="secondary-button" onClick={onClose} disabled={saving}>취소</button><button type="submit" className="primary-button save-button" disabled={saving || previewState === "loading"}>{saving ? <><LoaderCircle size={16} className="spin" /> 저장 중…</> : <><Bookmark size={16} /> {initialItem ? "수정 내용 저장" : "보관함에 담기"}</>}</button></div>
           </fieldset>

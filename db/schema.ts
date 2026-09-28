@@ -11,6 +11,7 @@ export const savedItems = sqliteTable("saved_items", {
   note: text("note").notNull().default(""),
   sourceDescription: text("source_description").notNull().default(""),
   imageKey: text("image_key"),
+  coverPhotoId: text("cover_photo_id"),
   createdAt: text("created_at").notNull(),
 });
 
