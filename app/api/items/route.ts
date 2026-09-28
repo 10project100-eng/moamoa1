@@ -4,6 +4,7 @@ import { getChatGPTUser } from "../../chatgpt-auth";
 import { getDb } from "../../../db";
 import { priceHistory, savedItemImages, savedItems } from "../../../db/schema";
 import { downloadProductPhoto, scrapeProductPage } from "../../../lib/product-scraper";
+import { validatePhotoFiles } from "../../../lib/photo-upload";
 
 const categories = new Set(["의류", "가방", "신발", "액세서리", "뷰티", "기타"]);
 const allowedUploadTypes = new Set(["image/jpeg", "image/png", "image/webp", "image/gif", "image/avif"]);
@@ -54,11 +55,16 @@ export async function POST(request: Request) {
     const rawPrice = String(form.get("price") ?? "").trim();
     const requestedPrice = rawPrice ? Number(rawPrice) : null;
     const image = form.get("image");
+    const uploads = form.getAll("images");
+    if (uploads.some((file) => !(file instanceof File))) return Response.json({ error: "사진 파일을 확인해 주세요." }, { status: 400 });
+    const files = uploads as File[];
     let selectedImageUrls: string[] = [];
     try {
       const value = JSON.parse(String(form.get("imageUrls") ?? "[]"));
       if (Array.isArray(value)) selectedImageUrls = value.filter((entry): entry is string => typeof entry === "string").slice(0, 6);
     } catch { return Response.json({ error: "사진 선택 정보를 확인해 주세요." }, { status: 400 }); }
+    const photoError = validatePhotoFiles([...files, ...(image instanceof File && image.size > 0 ? [image] : [])], selectedImageUrls.length);
+    if (photoError) return Response.json({ error: photoError }, { status: 400 });
 
     let page = null;
     if (url) {
@@ -96,8 +102,14 @@ export async function POST(request: Request) {
       await env.BUCKET.put(uploadedCaptureKey, image.stream(), { httpMetadata: { contentType: image.type } });
       uploadedKeys.push(uploadedCaptureKey);
     }
-    if (imports.length && !env.BUCKET) throw new Error("R2 binding BUCKET is unavailable");
+    if ((imports.length || files.length) && !env.BUCKET) throw new Error("R2 binding BUCKET is unavailable");
     const photos: { id: string; imageKey: string; contentType: string; sourceUrl: string; position: number }[] = [];
+    for (const [position, file] of files.entries()) {
+      const imageKey = crypto.randomUUID();
+      uploadedKeys.push(imageKey);
+      await env.BUCKET!.put(imageKey, file.stream(), { httpMetadata: { contentType: file.type } });
+      photos.push({ id: crypto.randomUUID(), imageKey, contentType: file.type, sourceUrl: "", position });
+    }
     let photoFailures = 0;
     for (const [position, photoUrl] of imports.entries()) {
       try {
@@ -105,7 +117,7 @@ export async function POST(request: Request) {
         const imageKey = crypto.randomUUID();
         await env.BUCKET!.put(imageKey, fetched.bytes, { httpMetadata: { contentType: fetched.contentType } });
         uploadedKeys.push(imageKey);
-        photos.push({ id: crypto.randomUUID(), imageKey, contentType: fetched.contentType, sourceUrl: photoUrl, position });
+        photos.push({ id: crypto.randomUUID(), imageKey, contentType: fetched.contentType, sourceUrl: photoUrl, position: files.length + position });
       } catch { photoFailures++; }
     }
     itemId = crypto.randomUUID();
@@ -118,7 +130,9 @@ export async function POST(request: Request) {
       id: crypto.randomUUID(), itemId, userId: user.userId, price,
       source: !manualEntry && page?.price === price ? "crawl" : "manual", recordedAt: item.createdAt,
     });
-    if (photos.length) await getDb().insert(savedItemImages).values(photos.map((photo) => ({ ...photo, itemId: itemId!, userId: user.userId })));
+    for (let offset = 0; offset < photos.length; offset += 10) {
+      await getDb().insert(savedItemImages).values(photos.slice(offset, offset + 10).map((photo) => ({ ...photo, itemId: itemId!, userId: user.userId })));
+    }
     return Response.json({
       item: { ...item, photos: photos.map((photo) => ({ id: photo.id, url: `/api/items/${item!.id}/photos/${photo.id}` })) },
       ...(photoFailures ? { warning: `아이템은 저장했지만 사진 ${photoFailures}장은 페이지에서 가져오지 못했어요.` } : {}),

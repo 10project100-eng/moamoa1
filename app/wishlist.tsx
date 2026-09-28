@@ -3,6 +3,7 @@
 import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowUpRight, Bookmark, Check, ChevronDown, ImagePlus, Link2, LoaderCircle, Plus, Search, Sparkles, Trash2, X } from "lucide-react";
 import { ItemDetailDialog } from "./item-detail";
+import { MAX_PHOTOS, PHOTO_TYPES, validatePhotoFiles } from "../lib/photo-upload";
 
 type Category = "의류" | "가방" | "신발" | "액세서리" | "뷰티" | "기타";
 export type SavedItem = {
@@ -117,7 +118,7 @@ export function Wishlist({ displayName }: { displayName: string }) {
                   <div className={`item-cover cover-${index % 5}`}>
                     {item.imageKey || item.photos?.length ? <img src={item.imageKey ? `/api/items/${item.id}/image?v=${item.imageKey}` : item.photos?.[0]?.url} alt={`${item.title} 상품 사진`} /> : <div className="cover-placeholder"><span className="placeholder-spark">✳</span><span>{item.category}</span></div>}
                     <span className="item-category">{item.category}</span>
-                    {!!item.photos?.length && <span className="photo-count">사진 {item.photos.length}장</span>}
+                    {!!(item.photos?.length || item.imageKey) && <span className="photo-count">사진 {(item.photos?.length ?? 0) + (item.imageKey ? 1 : 0)}장</span>}
                     <button className="delete-button" aria-label={`${item.title} 삭제`} disabled={removing === item.id} onClick={() => void removeItem(item)}>{removing === item.id ? <LoaderCircle size={16} className="spin" /> : <Trash2 size={16} />}</button>
                   </div>
                   {!!item.photos?.length && <div className="item-photo-strip">{item.photos.slice(item.imageKey ? 0 : 1, 5).map((photo) => <img key={photo.id} src={photo.url} alt="저장한 상품 사진" />)}</div>}
@@ -163,8 +164,14 @@ function AddItemDialog({ initialItem, onClose, onSaved }: { initialItem?: SavedI
   const [previewState, setPreviewState] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [previewMessage, setPreviewMessage] = useState("");
   const manualFields = useRef({ brand: false, title: false, category: false, price: false, description: false });
-  const [file, setFile] = useState<File | null>(null);
-  const [preview, setPreview] = useState(initialItem?.imageKey ? `/api/items/${initialItem.id}/image?v=${initialItem.imageKey}` : "");
+  const [uploads, setUploads] = useState<{ id: string; file: File; url: string }[]>([]);
+  const [removedPhotoIds, setRemovedPhotoIds] = useState<string[]>([]);
+  const [removeCapture, setRemoveCapture] = useState(false);
+  const uploadUrls = useRef(new Set<string>());
+  const savedPhotos = (initialItem?.photos ?? []).filter((photo) => !removedPhotoIds.includes(photo.id));
+  const hasCapture = Boolean(initialItem?.imageKey && !removeCapture);
+  const existingPhotoCount = savedPhotos.length + (hasCapture ? 1 : 0);
+  const photoCount = existingPhotoCount + uploads.length + selectedImages.length;
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -231,24 +238,40 @@ function AddItemDialog({ initialItem, onClose, onSaved }: { initialItem?: SavedI
     return () => { window.removeEventListener("keydown", onKeyDown); document.body.style.overflow = overflow; if (previous?.isConnected) previous.focus(); };
   }, []);
 
-  useEffect(() => () => { if (preview.startsWith("blob:")) URL.revokeObjectURL(preview); }, [preview]);
+  useEffect(() => {
+    const urls = uploadUrls.current;
+    return () => { urls.forEach((url) => URL.revokeObjectURL(url)); urls.clear(); };
+  }, []);
 
   function chooseFile(event: ChangeEvent<HTMLInputElement>) {
-    const selected = event.target.files?.[0] ?? null;
-    if (!selected) return;
-    if (!selected.type.startsWith("image/")) { setError("이미지 파일을 선택해 주세요."); return; }
-    if (selected.size > 10 * 1024 * 1024) { setError("이미지는 10MB 이하로 선택해 주세요."); return; }
-    setError(""); setFile(selected); setPreview(URL.createObjectURL(selected));
+    const selected = Array.from(event.target.files ?? []);
+    event.target.value = "";
+    if (!selected.length) return;
+    const photoError = validatePhotoFiles([...uploads.map((upload) => upload.file), ...selected], existingPhotoCount + selectedImages.length);
+    if (photoError) { setError(photoError); return; }
+    const added = selected.map((file) => { const url = URL.createObjectURL(file); uploadUrls.current.add(url); return { id: crypto.randomUUID(), file, url }; });
+    setError(""); setUploads((current) => [...current, ...added]);
+  }
+
+  function removeUpload(id: string) {
+    const upload = uploads.find((entry) => entry.id === id);
+    if (upload) { URL.revokeObjectURL(upload.url); uploadUrls.current.delete(upload.url); }
+    setUploads((current) => current.filter((entry) => entry.id !== id)); setError("");
   }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); if (savingRef.current) return; setSaving(true); setError("");
+    event.preventDefault(); if (savingRef.current) return;
+    const photoError = validatePhotoFiles(uploads.map((upload) => upload.file), existingPhotoCount + selectedImages.length);
+    if (photoError) { setError(photoError); return; }
+    setSaving(true); setError("");
     const form = new FormData();
     form.set("title", title); form.set("url", url); form.set("category", category);
     form.set("brand", brand); form.set("manualEntry", String(manualEntry || previewState === "error"));
     form.set("price", price); form.set("note", note); form.set("sourceDescription", sourceDescription);
     form.set("imageUrls", JSON.stringify(selectedImages));
-    if (file) form.set("image", file);
+    for (const upload of uploads) form.append("images", upload.file);
+    form.set("removePhotoIds", JSON.stringify(removedPhotoIds));
+    form.set("removeCapture", String(removeCapture));
     try {
       const response = await fetch(initialItem ? `/api/items/${initialItem.id}` : "/api/items", { method: initialItem ? "PATCH" : "POST", body: form });
       const data = await response.json() as { item: SavedItem; error?: string; warning?: string };
@@ -285,12 +308,15 @@ function AddItemDialog({ initialItem, onClose, onSaved }: { initialItem?: SavedI
           <textarea id="item-note" className="form-input form-textarea" rows={2} maxLength={600} value={note} onChange={(event) => setNote(event.target.value)} placeholder="색상, 사이즈, 왜 마음에 들었는지 적어두세요." />
 
           {initialItem && <p className="edit-help">가격을 변경하면 새로운 가격 기록이 추가돼요. 가격을 비워도 이전 기록은 보관돼요.</p>}
-          {!!initialItem?.photos?.length && <div className="edit-saved-photos" aria-label="보관 중인 상품 사진">{initialItem.photos.map((photo) => <img key={photo.id} src={photo.url} alt="보관 중인 상품 사진" />)}</div>}
-          <div className="field-label">직접 캡처한 화면 <span className="optional">{initialItem ? "추가·교체" : "추가 사진"} · 10MB 이하</span></div>
-          <input ref={fileRef} type="file" accept="image/*" className="visually-hidden" onChange={chooseFile} />
-          <button type="button" className={`upload-box ${preview ? "upload-box-has-file" : ""}`} onClick={() => fileRef.current?.click()}>
-            {preview ? <><img src={preview} alt="선택한 캡처 미리보기" /><span className="upload-file-name">{file?.name ?? "저장한 캡처"}</span><span className="upload-change">변경</span></> : <><span className="upload-icon"><ImagePlus size={19} /></span><span><strong>화면 캡처를 올려주세요</strong><small>PNG, JPG, WEBP · 화면을 오래 보관해요</small></span><span className="upload-action">파일 선택</span></>}
-          </button>
+          <div className="field-label">사진·캡처 <span className="optional">{photoCount} / {MAX_PHOTOS}장 · 한 장당 10MB 이하</span></div>
+          <input ref={fileRef} type="file" multiple accept={PHOTO_TYPES.join(",")} aria-label="사진 여러 장 선택" className="visually-hidden" onChange={chooseFile} />
+          {(hasCapture || savedPhotos.length > 0 || uploads.length > 0) && <div className="upload-photo-grid" aria-label="보관할 사진 목록">
+            {hasCapture && initialItem && <div className="upload-photo"><img src={`/api/items/${initialItem.id}/image?v=${initialItem.imageKey}`} alt="기존 캡처" /><span>보관 중</span><button type="button" className="photo-remove" aria-label="기존 캡처 빼기" onClick={() => { setRemoveCapture(true); setError(""); }}><X size={13} /></button></div>}
+            {savedPhotos.map((photo, index) => <div className="upload-photo" key={photo.id}><img src={photo.url} alt={`보관 중인 사진 ${index + 1}`} /><span>보관 중</span><button type="button" className="photo-remove" aria-label={`보관 중인 사진 ${index + 1} 빼기`} onClick={() => { setRemovedPhotoIds((current) => [...current, photo.id]); setError(""); }}><X size={13} /></button></div>)}
+            {uploads.map((upload, index) => <div className="upload-photo" key={upload.id}><img src={upload.url} alt={`추가할 사진 ${index + 1}: ${upload.file.name}`} /><span title={upload.file.name}>{upload.file.name}</span><button type="button" className="photo-remove" aria-label={`${upload.file.name} 빼기`} onClick={() => removeUpload(upload.id)}><X size={13} /></button></div>)}
+          </div>}
+          <button type="button" className="upload-box" disabled={photoCount >= MAX_PHOTOS} onClick={() => fileRef.current?.click()}><span className="upload-icon"><ImagePlus size={19} /></span><span><strong>사진 여러 장 추가하기</strong><small>JPG, PNG, WEBP, GIF, AVIF · 한 번에 최대 40MB</small></span><span className="upload-action">파일 선택</span></button>
+          {initialItem && <p className="edit-help">사진 추가·삭제는 ‘수정 내용 저장’을 누르면 적용돼요.</p>}
           {error && <p className="form-error" role="alert">{error}</p>}
           <div className="dialog-actions"><button type="button" className="secondary-button" onClick={onClose} disabled={saving}>취소</button><button type="submit" className="primary-button save-button" disabled={saving || previewState === "loading"}>{saving ? <><LoaderCircle size={16} className="spin" /> 저장 중…</> : <><Bookmark size={16} /> {initialItem ? "수정 내용 저장" : "보관함에 담기"}</>}</button></div>
           </fieldset>
