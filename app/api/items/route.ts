@@ -1,7 +1,7 @@
 import { desc, eq } from "drizzle-orm";
 import { env } from "cloudflare:workers";
 import { getChatGPTUser } from "../../chatgpt-auth";
-import { getDb } from "../../../db";
+import { ensureCoverPositionColumns, getDb } from "../../../db";
 import { priceHistory, savedItemImages, savedItems } from "../../../db/schema";
 import { downloadProductPhoto, MAX_IMPORTED_PHOTOS, scrapeProductPage } from "../../../lib/product-scraper";
 import { validatePhotoFiles } from "../../../lib/photo-upload";
@@ -19,6 +19,7 @@ export async function GET() {
   const user = await getChatGPTUser();
   if (!user) return Response.json({ error: "로그인이 필요해요." }, { status: 401 });
   try {
+    await ensureCoverPositionColumns();
     const db = getDb();
     const items = await db.select().from(savedItems)
       .where(eq(savedItems.userId, user.userId)).orderBy(desc(savedItems.createdAt));
@@ -44,6 +45,7 @@ export async function POST(request: Request) {
   let itemId: string | null = null;
   let uploadedCaptureKey: string | null = null;
   try {
+    await ensureCoverPositionColumns();
     const form = await request.formData();
     const url = String(form.get("url") ?? "").trim().slice(0, 2048);
     const requestedTitle = String(form.get("title") ?? "").trim().slice(0, 300);

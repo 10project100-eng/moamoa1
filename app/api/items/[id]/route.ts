@@ -1,7 +1,7 @@
 import { and, eq, inArray } from "drizzle-orm";
 import { env } from "cloudflare:workers";
 import { getChatGPTUser } from "../../../chatgpt-auth";
-import { getDb } from "../../../../db";
+import { ensureCoverPositionColumns, getDb } from "../../../../db";
 import { priceHistory, savedItemImages, savedItems } from "../../../../db/schema";
 import { validatePhotoFiles } from "../../../../lib/photo-upload";
 
@@ -13,6 +13,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   let committed = false;
   try {
     const { id } = await params;
+    await ensureCoverPositionColumns();
     const db = getDb();
     const owned = and(eq(savedItems.id, id), eq(savedItems.userId, user.userId));
     const [item] = await db.select().from(savedItems).where(owned).limit(1);
