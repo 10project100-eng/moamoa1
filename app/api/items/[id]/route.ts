@@ -53,6 +53,15 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     const replacement = image instanceof File && image.size > 0 ? image : null;
     const requestedCoverPhotoId = String(form.get("coverPhotoId") ?? "");
     const rawCoverUploadIndex = String(form.get("coverPhotoUploadIndex") ?? "");
+    const readPosition = (key: string, fallback: number) => {
+      if (!form.has(key)) return fallback;
+      const raw = String(form.get(key) ?? "");
+      const value = Number(raw);
+      return /^\d+$/.test(raw) && Number.isSafeInteger(value) && value >= 0 && value <= 100 ? value : null;
+    };
+    const coverPositionX = readPosition("coverPositionX", item.coverPositionX ?? 50);
+    const coverPositionY = readPosition("coverPositionY", item.coverPositionY ?? 50);
+    if (coverPositionX === null || coverPositionY === null) return Response.json({ error: "썸네일 위치를 확인해 주세요." }, { status: 400 });
     const photoError = validatePhotoFiles([...files, ...(replacement ? [replacement] : [])], keptPhotos.length + (item.imageKey && !removeCapture && !replacement ? 1 : 0));
     if (photoError) return Response.json({ error: photoError }, { status: 400 });
     const hasCoverSelection = form.has("coverPhotoId") || form.has("coverPhotoUploadIndex");
@@ -87,7 +96,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     }
     let coverPhotoId = item.coverPhotoId;
     if (hasCoverSelection) coverPhotoId = coverUploadIndex >= 0 ? newPhotos[coverUploadIndex].id : requestedCoverPhotoId || null;
-    const update = db.update(savedItems).set({ title, brand, url, category, price, note, sourceDescription, imageKey: uploadedKey ?? (removeCapture ? null : item.imageKey), coverPhotoId }).where(owned).returning();
+    const update = db.update(savedItems).set({ title, brand, url, category, price, note, sourceDescription, imageKey: uploadedKey ?? (removeCapture ? null : item.imageKey), coverPhotoId, coverPositionX, coverPositionY }).where(owned).returning();
     const results = await db.batch([
       update,
       ...(price !== null && price !== item.price ? [db.insert(priceHistory).values({ id: crypto.randomUUID(), itemId: id, userId: user.userId, price, source: "manual", recordedAt: new Date().toISOString() })] : []),
